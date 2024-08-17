@@ -1,0 +1,12 @@
+name: scripts
+title:
+username: tinkerapps
+account: tinkerapps
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12468580
+bundleId: 8994008
+url: https://tinkerapps.shinyapps.io/scripts/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
