@@ -2,7 +2,6 @@
 library(tidyverse) # https://www.tidyverse.org/
 library(dplyr) # or just dplyr
 library(quantmod)
-library(quantmod)
 library(TTR)
 library(PerformanceAnalytics)
 library(purrr)
@@ -55,6 +54,6 @@ stock_data_list <- map(tickers, download_stock_data,.progress = TRUE)
 # Name the list elements with the ticker symbols
 names(stock_data_list) <- sp500_table$Security
 
-saveRDS(stock_data_list,file = "data/stock_data_list.rds")
+saveRDS(stock_data_list,file = "~/Kaggle Projects/shiny-stock-monitor/app-files/data/stock_data_list.rds")
 
 

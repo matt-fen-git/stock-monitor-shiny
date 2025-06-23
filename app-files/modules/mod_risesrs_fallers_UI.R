@@ -3,22 +3,28 @@ mod_risers_fallers_UI <- function(id){
   ns <- NS(id)
   
   tagList(
-    useShinyalert(),
+    useShinyalert(force = TRUE),
     sidebarLayout(
-    sidebarPanel(width = 2,
-                 selectInput(ns("stock"), "Select Stock:", choices = names(stock_data_list)),
-                 dateRangeInput(ns("dateRange"), "Select Date Range:", 
-                                start = Sys.Date() - 180, 
-                                end = Sys.Date()),
-                 actionButton(ns("update"), "Update Chart"),
-                 
-    ),
-    
-    mainPanel(width = 8,
-              withSpinner(gt_output(ns("faller_table")))
-              
+      sidebarPanel(width = 2,
+                   #selectInput(ns("stock"), "Select Stock:", choices = names(stock_data_list)),
+                   dateRangeInput(ns("dateRange"), "Select Date Range:", 
+                                  start = Sys.Date() - 180, 
+                                  end = Sys.Date()),
+                   
+                   radioButtons(ns("range"),
+                                "Last Dips range:",
+                                choices = c("Last Week","Last Month","Last Quarter","All"),
+                                choiceValues = c(7,31,180)),
+                   
+                   actionButton(ns("update"), "Update Chart"),
+                   
+      ),
+      
+      mainPanel(width = 8,
+                withSpinner(gt_output(ns("faller_table")))
+                
+      )
     )
-  )
   )
 }
 
@@ -36,15 +42,28 @@ mod_risers_fallers_Server <- function(id){
       type = "info",
       closeOnClickOutside = TRUE
     )
-        
+    
     table_data <- 
       eventReactive(
         input$update,{
-          # Filter table by dates.
-          faller_data <- all_dips_data %>% filter(between(as.Date(date),
-                                                          as.Date(input$dateRange[1]),
-                                                          as.Date(input$dateRange[2])))
-        })
+          
+          
+          print(input$range)
+          
+          
+          if(input$range == "All")
+          {
+            # Filter table by dates.
+            faller_data <- all_dips_data %>% filter(between(as.Date(date),
+                                                            as.Date(input$dateRange[1]),
+                                                            as.Date(input$dateRange[2])))
+          } else if(input$range == "Last Week") {
+            faller_data <- all_dips_data %>% filter(between(as.Date(date),
+                                                            max(as.Date(date)) - lubridate::days(7),
+                                                            max(as.Date(date))))
+          }
+        }
+      )
     
     output$faller_table <- 
       render_gt({

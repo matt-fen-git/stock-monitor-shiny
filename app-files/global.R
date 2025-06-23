@@ -4,11 +4,13 @@ library(shinycssloaders)
 library(shinyjs)
 library(shinyalert)
 library(quantmod)
+library(highcharter)
 library(markdown)
 library(gt)
 library(gtExtras)
 library(tidyr)
 library(dplyr)
+library(highcharter)
 
 # Read the content of the text file and convert it to Markdown
 # rsi_content <- suppressWarnings(readLines("~/Kaggle Projects/shiny-stock-monitor/app-files/Descriptions/rsi_info.txt"))

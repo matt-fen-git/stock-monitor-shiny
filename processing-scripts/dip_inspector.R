@@ -57,4 +57,5 @@ tick_names <- names(stock_data_list)
 
 
 all_dips_data <- do.call(rbind,purrr::map(tick_names,get_dips,.progress = TRUE))
-data.table::fwrite(all_dips_data,"data/all_dips_data.csv")
+
+data.table::fwrite(all_dips_data,"~/Kaggle Projects/shiny-stock-monitor/app-files/data/all_dips_data.csv")
