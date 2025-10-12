@@ -1,35 +1,66 @@
-# UI Module (unchanged)
+# UI Module with Signal Gauges
 mod_stock_analysis_UI <- function(id) {
   ns <- NS(id)
-  sidebarLayout(
-    sidebarPanel(
-      width = 2,
-      selectInput(ns("stock"), "Select Stock:", choices = names(stock_data_list)),
-      dateRangeInput(ns("dateRange"), "Select Date Range:",
-                     start = Sys.Date() - 365,
-                     end = Sys.Date()
+  fluidPage(
+    fluidRow(
+      column(
+        2,
+        wellPanel(
+          style = "background: #151b3d; border: 1px solid #2a3150;",
+          selectInput(ns("stock"), "Select Stock:", choices = names(stock_data_list)),
+          dateRangeInput(ns("dateRange"), "Select Date Range:",
+                         start = Sys.Date() - 365,
+                         end = Sys.Date()
+          ),
+          checkboxGroupInput(
+            ns("indicators"),
+            "Additional Indicators:",
+            choices = c(
+              "Stochastic Oscillator" = "stoch",
+              "MFI (Volume RSI)" = "mfi",
+              "OBV (Volume Trend)" = "obv",
+              "ADX (Trend Strength)" = "adx",
+              "EMAs (50 & 200)" = "ema"
+            ),
+            selected = c("stoch", "obv", "adx")
+          ),
+          actionButton(ns("update"), "Update Chart", class = "btn-primary", style = "width: 100%;"),
+          hr(),
+          actionButton(ns("toggle_guide"), "Show/Hide Indicator Guide", 
+                       class = "btn-info", style = "width: 100%;")
+        )
       ),
-      actionButton(ns("update"), "Update Chart")
-    ),
-    mainPanel(
-      width = 10,
-      highchartOutput(ns("stockChart"), height = "800px")
+      column(
+        10,
+        # Signal Gauges Panel
+        div(
+          style = "background: linear-gradient(135deg, #1a2142 0%, #151b3d 100%); 
+                   border: 1px solid #2a3150; border-radius: 8px; padding: 15px; margin-bottom: 20px;",
+          h4("Buy/Sell Signal Dashboard", 
+             style = "color: #00d4ff; text-align: center; margin-bottom: 15px;"),
+          uiOutput(ns("signal_gauges"))
+        ),
+        highchartOutput(ns("stockChart"), height = "800px"),
+        br(),
+        uiOutput(ns("guide_panel"))
+      )
     )
   )
 }
 
-# Server Module with FIXED candlestick colors
+# Server Module
 mod_stock_analysis_Server <- function(id) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
+    guide_visible <- reactiveVal(FALSE)
+    
+    observeEvent(input$toggle_guide, {
+      guide_visible(!guide_visible())
+    })
+    
     filtered_data <- eventReactive(input$update, {
       this_stock <- stock_data_list[[input$stock]]
-      
-      # Keep original column names for proper xts recognition
-      # Don't rename columns - highcharter needs the stock symbol prefix
-      
-      # Subset data based on the selected date range
       this_stock <- this_stock[paste(input$dateRange[1], input$dateRange[2], sep = "/")]
       
       if (nrow(this_stock) < 30) {
@@ -40,6 +71,318 @@ mod_stock_analysis_Server <- function(id) {
       this_stock
     })
     
+    # Calculate signal scores
+    # Calculate signal scores (FULLY FIXED)
+    signal_data <- reactive({
+      req(input$update)  # Require update button click
+      this_stock <- filtered_data()
+      if (is.null(this_stock)) return(NULL)
+      
+      valid_close <- !is.na(Cl(this_stock))
+      this_stock_clean <- this_stock[valid_close, ]
+      
+      if (nrow(this_stock_clean) < 30) return(NULL)
+      
+      # Calculate indicators and convert to numeric immediately
+      rsi_val <- RSI(Cl(this_stock_clean), n = 14)
+      rsi <- as.numeric(tail(rsi_val, 1))
+      
+      bb <- BBands(Cl(this_stock_clean), n = 20, sd = 2)
+      bb_upper <- as.numeric(tail(bb[, "up"], 1))
+      bb_lower <- as.numeric(tail(bb[, "dn"], 1))
+      
+      macd_vals <- MACD(Cl(this_stock_clean), maType = "SMA")
+      macd_line <- as.numeric(tail(macd_vals[, "macd"], 1))
+      signal_line <- as.numeric(tail(macd_vals[, "signal"], 1))
+      
+      current_price <- as.numeric(tail(Cl(this_stock_clean), 1))
+      
+      # RSI Signal - now using plain numeric
+      if (is.na(rsi)) rsi <- 50  # Default fallback
+      rsi_signal <- if (rsi < 30) "Strong Buy" else if (rsi < 40) "Buy" else if (rsi < 60) "Neutral" else if (rsi < 70) "Sell" else "Strong Sell"
+      rsi_score <- if (rsi < 30) 100 else if (rsi < 40) 75 else if (rsi < 60) 50 else if (rsi < 70) 25 else 0
+      
+      # Bollinger Band Signal
+      bb_position <- ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100
+      if (is.na(bb_position)) bb_position <- 50
+      bb_signal <- if (bb_position < 10) "Strong Buy" else if (bb_position < 30) "Buy" else if (bb_position < 70) "Neutral" else if (bb_position < 90) "Sell" else "Strong Sell"
+      bb_score <- 100 - bb_position
+      
+      # MACD Signal
+      macd_diff <- macd_line - signal_line
+      if (is.na(macd_diff)) macd_diff <- 0
+      macd_signal <- if (macd_diff > 0) "Buy" else "Sell"
+      macd_score <- if (macd_diff > 0) 75 else 25
+      
+      # Base signals
+      signals <- list(
+        rsi = list(signal = rsi_signal, score = rsi_score, value = round(rsi, 1)),
+        bb = list(signal = bb_signal, score = bb_score, value = paste0(round(bb_position, 0), "%")),
+        macd = list(signal = macd_signal, score = macd_score, value = round(macd_diff, 4))
+      )
+      
+      # Stochastic
+      if ("stoch" %in% input$indicators) {
+        stoch_vals <- stoch(HLC(this_stock_clean), nFastK = 14, nSlowK = 3, nSlowD = 3)
+        stoch_k <- as.numeric(tail(stoch_vals[, "fastK"], 1))
+        if (is.na(stoch_k)) stoch_k <- 50
+        stoch_signal <- if (stoch_k < 20) "Strong Buy" else if (stoch_k < 40) "Buy" else if (stoch_k < 60) "Neutral" else if (stoch_k < 80) "Sell" else "Strong Sell"
+        stoch_score <- 100 - stoch_k
+        signals$stoch <- list(signal = stoch_signal, score = stoch_score, value = round(stoch_k, 1))
+      }
+      
+      # MFI
+      if ("mfi" %in% input$indicators) {
+        mfi_vals <- MFI(HLC(this_stock_clean), Vo(this_stock_clean), n = 14)
+        mfi_val <- as.numeric(tail(mfi_vals, 1))
+        if (is.na(mfi_val)) mfi_val <- 50
+        mfi_signal <- if (mfi_val < 20) "Strong Buy" else if (mfi_val < 40) "Buy" else if (mfi_val < 60) "Neutral" else if (mfi_val < 80) "Sell" else "Strong Sell"
+        mfi_score <- 100 - mfi_val
+        signals$mfi <- list(signal = mfi_signal, score = mfi_score, value = round(mfi_val, 1))
+      }
+      
+      # OBV
+      if ("obv" %in% input$indicators) {
+        obv_vals <- OBV(Cl(this_stock_clean), Vo(this_stock_clean))
+        obv_current <- as.numeric(tail(obv_vals, 1))
+        obv_past <- as.numeric(tail(obv_vals, 6)[1])
+        obv_trend <- obv_current - obv_past
+        obv_signal <- if (obv_trend > 0) "Buy" else "Sell"
+        obv_score <- if (obv_trend > 0) 75 else 25
+        signals$obv <- list(signal = obv_signal, score = obv_score, value = "Trend")
+      }
+      
+      # ADX
+      if ("adx" %in% input$indicators) {
+        adx_vals <- ADX(HLC(this_stock_clean), n = 14)
+        adx_val <- as.numeric(tail(adx_vals[, "ADX"], 1))
+        di_p <- as.numeric(tail(adx_vals[, "DIp"], 1))
+        di_n <- as.numeric(tail(adx_vals[, "DIn"], 1))
+        if (is.na(adx_val)) adx_val <- 25
+        adx_signal <- if (adx_val < 25 & di_p > di_n) "Buy" else if (adx_val < 25) "Neutral" else if (adx_val > 40) "Strong Trend" else "Caution"
+        adx_score <- if (adx_val < 25) 75 else 25
+        signals$adx <- list(signal = adx_signal, score = adx_score, value = round(adx_val, 1))
+      }
+      
+      # EMA
+      if ("ema" %in% input$indicators) {
+        ema50 <- as.numeric(tail(EMA(Cl(this_stock_clean), n = 50), 1))
+        ema200 <- as.numeric(tail(EMA(Cl(this_stock_clean), n = 200), 1))
+        ema_signal <- if (current_price > ema50 & current_price > ema200) "Strong Buy" else if (current_price > ema200) "Buy" else if (current_price > ema50) "Neutral" else "Sell"
+        ema_score <- if (current_price > ema50 & current_price > ema200) 100 else if (current_price > ema200) 75 else if (current_price > ema50) 50 else 25
+        signals$ema <- list(signal = ema_signal, score = ema_score, value = "Position")
+      }
+      
+      # Overall signal
+      avg_score <- mean(sapply(signals, function(x) x$score), na.rm = TRUE)
+      overall <- if (avg_score >= 75) "STRONG BUY" else if (avg_score >= 60) "BUY" else if (avg_score >= 40) "NEUTRAL" else if (avg_score >= 25) "SELL" else "STRONG SELL"
+      
+      list(signals = signals, overall = overall, score = avg_score)
+    })
+    
+    # Render signal gauges
+    # Render signal gauges (CORRECTED to show actual indicator values)
+    output$signal_gauges <- renderUI({
+      sig_data <- signal_data()
+      if (is.null(sig_data)) return(div("Click 'Update Chart' to see signals", style = "text-align: center; color: #b0b3b8;"))
+      
+      # Helper function to create value gauge with color zones
+      create_gauge <- function(name, signal, score, actual_value, range_min = 0, range_max = 100) {
+        # Determine color based on signal strength
+        color <- case_when(
+          grepl("Strong Buy|Buy", signal) ~ "#00ff88",
+          grepl("Neutral", signal) ~ "#ffa502",
+          grepl("Sell|Caution|Trend", signal) ~ "#ff4757",
+          TRUE ~ "#b0b3b8"
+        )
+        
+        # Calculate position percentage for gauge needle
+        value_position <- ((actual_value - range_min) / (range_max - range_min)) * 100
+        value_position <- max(0, min(100, value_position))  # Clamp to 0-100
+        
+        div(
+          style = "display: inline-block; width: 160px; margin: 0 8px 15px 8px; 
+               text-align: center; vertical-align: top;",
+          # Gauge background with zones
+          div(
+            style = "position: relative; height: 30px; border-radius: 15px; 
+                 background: linear-gradient(to right, 
+                   #00ff88 0%, #00ff88 30%,     /* Buy zone */
+                   #ffa502 30%, #ffa502 70%,    /* Neutral zone */
+                   #ff4757 70%, #ff4757 100%);  /* Sell zone */
+                 border: 2px solid #2a3150; margin-bottom: 8px;",
+            # Value needle indicator
+            div(
+              style = sprintf("position: absolute; left: %s%%; top: -5px; 
+                           width: 4px; height: 40px; background: white; 
+                           box-shadow: 0 0 10px rgba(255,255,255,0.8);
+                           transform: translateX(-50%%);", value_position)
+            ),
+            # Current value overlay
+            div(
+              style = "position: absolute; width: 100%%; top: 50%%; 
+                   transform: translateY(-50%%); text-align: center;",
+              strong(actual_value, style = "color: #0a0e27; font-size: 16px; 
+                                        text-shadow: 0 0 3px white;")
+            )
+          ),
+          div(strong(name), style = "color: #00d4ff; font-size: 13px; margin-bottom: 3px;"),
+          div(signal, style = sprintf("color: %s; font-weight: 600; font-size: 13px;", color))
+        )
+      }
+      
+      # Create gauges for each indicator with appropriate ranges
+      gauges <- list()
+      
+      if (!is.null(sig_data$signals$rsi)) {
+        gauges$rsi <- create_gauge(
+          "RSI (14)",
+          sig_data$signals$rsi$signal,
+          sig_data$signals$rsi$score,
+          sig_data$signals$rsi$value,
+          range_min = 0,
+          range_max = 100
+        )
+      }
+      
+      if (!is.null(sig_data$signals$bb)) {
+        gauges$bb <- create_gauge(
+          "BB Position",
+          sig_data$signals$bb$signal,
+          sig_data$signals$bb$score,
+          round(as.numeric(gsub("%", "", sig_data$signals$bb$value)), 0),
+          range_min = 0,
+          range_max = 100
+        )
+      }
+      
+      if (!is.null(sig_data$signals$macd)) {
+        macd_val <- sig_data$signals$macd$value
+        gauges$macd <- div(
+          style = "display: inline-block; width: 160px; margin: 0 8px 15px 8px; 
+               text-align: center; vertical-align: top;",
+          div(
+            style = sprintf("height: 30px; border-radius: 15px; margin-bottom: 8px;
+                         background: %s; border: 2px solid #2a3150;
+                         display: flex; align-items: center; justify-content: center;",
+                         if(macd_val > 0) "#00ff88" else "#ff4757"),
+            strong(macd_val, style = "color: #0a0e27; font-size: 16px;")
+          ),
+          div(strong("MACD Diff"), style = "color: #00d4ff; font-size: 13px; margin-bottom: 3px;"),
+          div(sig_data$signals$macd$signal, 
+              style = sprintf("color: %s; font-weight: 600; font-size: 13px;",
+                              if(macd_val > 0) "#00ff88" else "#ff4757"))
+        )
+      }
+      
+      if (!is.null(sig_data$signals$stoch)) {
+        gauges$stoch <- create_gauge(
+          "Stochastic %K",
+          sig_data$signals$stoch$signal,
+          sig_data$signals$stoch$score,
+          sig_data$signals$stoch$value,
+          range_min = 0,
+          range_max = 100
+        )
+      }
+      
+      if (!is.null(sig_data$signals$mfi)) {
+        gauges$mfi <- create_gauge(
+          "MFI (14)",
+          sig_data$signals$mfi$signal,
+          sig_data$signals$mfi$score,
+          sig_data$signals$mfi$value,
+          range_min = 0,
+          range_max = 100
+        )
+      }
+      
+      if (!is.null(sig_data$signals$obv)) {
+        obv_trending_up <- sig_data$signals$obv$signal == "Buy"
+        gauges$obv <- div(
+          style = "display: inline-block; width: 160px; margin: 0 8px 15px 8px; 
+               text-align: center; vertical-align: top;",
+          div(
+            style = sprintf("height: 30px; border-radius: 15px; margin-bottom: 8px;
+                         background: %s; border: 2px solid #2a3150;
+                         display: flex; align-items: center; justify-content: center;",
+                         if(obv_trending_up) "#00ff88" else "#ff4757"),
+            div(
+              style = "color: #0a0e27; font-size: 20px;",
+              if(obv_trending_up) "↗" else "↘"
+            )
+          ),
+          div(strong("OBV Trend"), style = "color: #00d4ff; font-size: 13px; margin-bottom: 3px;"),
+          div(sig_data$signals$obv$signal, 
+              style = sprintf("color: %s; font-weight: 600; font-size: 13px;",
+                              if(obv_trending_up) "#00ff88" else "#ff4757"))
+        )
+      }
+      
+      if (!is.null(sig_data$signals$adx)) {
+        gauges$adx <- create_gauge(
+          "ADX Strength",
+          sig_data$signals$adx$signal,
+          sig_data$signals$adx$score,
+          sig_data$signals$adx$value,
+          range_min = 0,
+          range_max = 60  # ADX typically 0-60 range
+        )
+      }
+      
+      if (!is.null(sig_data$signals$ema)) {
+        ema_above <- grepl("Buy", sig_data$signals$ema$signal)
+        gauges$ema <- div(
+          style = "display: inline-block; width: 160px; margin: 0 8px 15px 8px; 
+               text-align: center; vertical-align: top;",
+          div(
+            style = sprintf("height: 30px; border-radius: 15px; margin-bottom: 8px;
+                         background: %s; border: 2px solid #2a3150;
+                         display: flex; align-items: center; justify-content: center;",
+                         if(ema_above) "#00ff88" else "#ff4757"),
+            div(
+              style = "color: #0a0e27; font-size: 20px;",
+              if(ema_above) "✓" else "✗"
+            )
+          ),
+          div(strong("EMA Position"), style = "color: #00d4ff; font-size: 13px; margin-bottom: 3px;"),
+          div(sig_data$signals$ema$signal, 
+              style = sprintf("color: %s; font-weight: 600; font-size: 13px;",
+                              if(ema_above) "#00ff88" else "#ff4757"))
+        )
+      }
+      
+      overall_color <- case_when(
+        grepl("STRONG BUY|BUY", sig_data$overall) ~ "#00ff88",
+        grepl("NEUTRAL", sig_data$overall) ~ "#ffa502",
+        TRUE ~ "#ff4757"
+      )
+      
+      div(
+        div(
+          style = "display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start;",
+          gauges
+        ),
+        div(
+          style = "width: 100%; margin-top: 20px; padding: 15px; 
+               background: rgba(0, 212, 255, 0.1); border-radius: 12px; 
+               border: 2px solid #2a3150;",
+          div(
+            style = "text-align: center;",
+            h3(
+              sig_data$overall,
+              style = sprintf("color: %s; margin: 0 0 5px 0; 
+                           text-shadow: 0 0 15px %s; font-size: 28px;", 
+                           overall_color, overall_color)
+            ),
+            div(
+              sprintf("Composite Score: %s/100", round(sig_data$score)),
+              style = "color: #e8eaed; font-size: 16px; font-weight: 500;"
+            )
+          )
+        )
+      )
+    })
     output$stockChart <- renderHighchart({
       this_stock <- filtered_data()
       
@@ -47,7 +390,7 @@ mod_stock_analysis_Server <- function(id) {
         return(highchart() %>% hc_title(text = "No data available - select wider date range"))
       }
       
-      # Remove rows with NA close prices
+      # Remove NA rows
       valid_close <- !is.na(Cl(this_stock))
       this_stock_clean <- this_stock[valid_close, ]
       
@@ -57,162 +400,139 @@ mod_stock_analysis_Server <- function(id) {
                  hc_subtitle(text = "Stock has data gaps - try different date range"))
       }
       
-      # Calculate indicators
+      # Core Indicators
       bollinger_bands <- TTR::BBands(Cl(this_stock_clean), n = 20, sd = 2)
       rsi.14 <- RSI(Cl(this_stock_clean), n = 14)
       RSI.SellLevel <- xts(rep(70, NROW(this_stock_clean)), index(this_stock_clean))
       RSI.BuyLevel <- xts(rep(30, NROW(this_stock_clean)), index(this_stock_clean))
       macd <- MACD(Cl(this_stock_clean), maType = "SMA")
       
-      # Build chart with proper stock type and explicit candlestick colors
-      highchart(type = "stock") %>%
-        hc_yAxis_multiples(create_yaxis(3, height = c(2, 1, 1), turnopposite = TRUE)) %>%
-        
-        # Add candlestick with EXPLICIT color control
+      # Additional Indicators (conditional)
+      stoch <- if ("stoch" %in% input$indicators) {
+        stoch(HLC(this_stock_clean), nFastK = 14, nSlowK = 3, nSlowD = 3)
+      } else NULL
+      
+      mfi <- if ("mfi" %in% input$indicators) {
+        MFI(HLC(this_stock_clean), Vo(this_stock_clean), n = 14)
+      } else NULL
+      
+      obv <- if ("obv" %in% input$indicators) {
+        OBV(Cl(this_stock_clean), Vo(this_stock_clean))
+      } else NULL
+      
+      adx <- if ("adx" %in% input$indicators) {
+        ADX(HLC(this_stock_clean), n = 14)
+      } else NULL
+      
+      ema50 <- if ("ema" %in% input$indicators) {
+        EMA(Cl(this_stock_clean), n = 50)
+      } else NULL
+      
+      ema200 <- if ("ema" %in% input$indicators) {
+        EMA(Cl(this_stock_clean), n = 200)
+      } else NULL
+      
+      # Dynamic panel count
+      num_panels <- 3
+      if (!is.null(obv) || !is.null(mfi)) num_panels <- num_panels + 1
+      if (!is.null(adx)) num_panels <- num_panels + 1
+      
+      panel_heights <- switch(
+        as.character(num_panels),
+        "3" = c(3, 1, 1),
+        "4" = c(3, 1, 1, 1),
+        "5" = c(3, 1, 1, 1, 1),
+        c(3, 1, 1)
+      )
+      
+      # Build chart
+      chart <- highchart(type = "stock") %>%
+        hc_yAxis_multiples(create_yaxis(num_panels, height = panel_heights, turnopposite = TRUE)) %>%
         hc_add_series(
           this_stock_clean,
           type = "candlestick",
           yAxis = 0,
           name = input$stock,
-          color = "#ef5350",      # Red for bearish (close < open)
-          upColor = "#26a69a",    # Green for bullish (close > open)
-          lineColor = "#ef5350",  # Border color for bearish
-          upLineColor = "#26a69a" # Border color for bullish
+          color = "#ef5350",
+          upColor = "#26a69a",
+          lineColor = "#ef5350",
+          upLineColor = "#26a69a",
+          id = "main"
         ) %>%
-        
-        # Add Bollinger Bands
-        hc_add_series(
-          bollinger_bands[, "up"],
-          yAxis = 0,
-          name = "BB Upper",
-          color = "#f45b5b",
-          type = "line",
-          lineWidth = 1,
-          dashStyle = "ShortDash"
-        ) %>%
-        hc_add_series(
-          bollinger_bands[, "dn"],
-          yAxis = 0,
-          name = "BB Lower",
-          color = "#f45b5b",
-          type = "line",
-          lineWidth = 1,
-          dashStyle = "ShortDash"
-        ) %>%
-        hc_add_series(
-          bollinger_bands[, "mavg"],
-          yAxis = 0,
-          name = "BB Middle (SMA20)",
-          color = "#90ed7d",
-          type = "line",
-          lineWidth = 1.5
-        ) %>%
-        
-        # Add RSI
-        hc_add_series(
-          rsi.14,
-          yAxis = 1,
-          name = "RSI (14)",
-          color = "#7cb5ec",
-          type = "line"
-        ) %>%
-        hc_add_series(
-          RSI.SellLevel,
-          color = hex_to_rgba("red", 0.7),
-          yAxis = 1,
-          name = "Overbought (70)",
-          dashStyle = "Dash"
-        ) %>%
-        hc_add_series(
-          RSI.BuyLevel,
-          color = hex_to_rgba("green", 0.7),
-          yAxis = 1,
-          name = "Oversold (30)",
-          dashStyle = "Dash"
-        ) %>%
-        
-        # Add MACD
-        hc_add_series(
-          macd[, "macd"],
-          yAxis = 2,
-          name = "MACD Line",
-          type = "line",
-          color = "#7cb5ec"
-        ) %>%
-        hc_add_series(
-          macd[, "signal"],
-          yAxis = 2,
-          name = "Signal Line",
-          type = "line",
-          color = "#f45b5b"
-        ) %>%
-        hc_add_series(
-          macd[, "macd"] - macd[, "signal"],
-          yAxis = 2,
-          name = "MACD Histogram",
-          type = "column",
-          color = "#434348"
-        ) %>%
-        
-        # Apply dark theme for consistency
+        hc_add_series(bollinger_bands[, "up"], yAxis = 0, name = "BB Upper", color = "#f45b5b", type = "line", lineWidth = 1, dashStyle = "ShortDash") %>%
+        hc_add_series(bollinger_bands[, "dn"], yAxis = 0, name = "BB Lower", color = "#f45b5b", type = "line", lineWidth = 1, dashStyle = "ShortDash") %>%
+        hc_add_series(bollinger_bands[, "mavg"], yAxis = 0, name = "BB Middle (SMA20)", color = "#90ed7d", type = "line", lineWidth = 1.5)
+      
+      if (!is.null(ema50)) {
+        chart <- chart %>% hc_add_series(ema50, yAxis = 0, name = "EMA 50", color = "#ff9800", type = "line", lineWidth = 2)
+      }
+      
+      if (!is.null(ema200)) {
+        chart <- chart %>% hc_add_series(ema200, yAxis = 0, name = "EMA 200", color = "#e91e63", type = "line", lineWidth = 2)
+      }
+      
+      chart <- chart %>%
+        hc_add_series(rsi.14, yAxis = 1, name = "RSI (14)", color = "#7cb5ec", type = "line", lineWidth = 2) %>%
+        hc_add_series(RSI.SellLevel, color = hex_to_rgba("red", 0.5), yAxis = 1, name = "Overbought (70)", dashStyle = "Dash", lineWidth = 1) %>%
+        hc_add_series(RSI.BuyLevel, color = hex_to_rgba("green", 0.5), yAxis = 1, name = "Oversold (30)", dashStyle = "Dash", lineWidth = 1)
+      
+      if (!is.null(stoch)) {
+        Stoch.BuyLevel <- xts(rep(20, NROW(this_stock_clean)), index(this_stock_clean))
+        Stoch.SellLevel <- xts(rep(80, NROW(this_stock_clean)), index(this_stock_clean))
+        chart <- chart %>%
+          hc_add_series(stoch$fastK, yAxis = 1, name = "Stochastic %K", color = "#e67e22", type = "line", lineWidth = 1.5, dashStyle = "ShortDot") %>%
+          hc_add_series(stoch$fastD, yAxis = 1, name = "Stochastic %D", color = "#95a5a6", type = "line", lineWidth = 1, dashStyle = "Dot") %>%
+          hc_add_series(Stoch.BuyLevel, yAxis = 1, name = "Stoch Oversold (20)", color = hex_to_rgba("green", 0.3), dashStyle = "Dash", lineWidth = 1) %>%
+          hc_add_series(Stoch.SellLevel, yAxis = 1, name = "Stoch Overbought (80)", color = hex_to_rgba("red", 0.3), dashStyle = "Dash", lineWidth = 1)
+      }
+      
+      chart <- chart %>%
+        hc_add_series(macd[, "macd"], yAxis = 2, name = "MACD Line", type = "line", color = "#7cb5ec", lineWidth = 2) %>%
+        hc_add_series(macd[, "signal"], yAxis = 2, name = "Signal Line", type = "line", color = "#f45b5b", lineWidth = 2) %>%
+        hc_add_series(macd[, "macd"] - macd[, "signal"], yAxis = 2, name = "MACD Histogram", type = "column", color = "#434348")
+      
+      current_yaxis <- 3
+      if (!is.null(obv) || !is.null(mfi)) {
+        if (!is.null(obv)) {
+          chart <- chart %>% hc_add_series(obv, yAxis = current_yaxis, name = "OBV (Volume Trend)", color = "#a569bd", type = "line", lineWidth = 2)
+        }
+        if (!is.null(mfi)) {
+          MFI.SellLevel <- xts(rep(80, NROW(this_stock_clean)), index(this_stock_clean))
+          MFI.BuyLevel <- xts(rep(20, NROW(this_stock_clean)), index(this_stock_clean))
+          chart <- chart %>%
+            hc_add_series(mfi, yAxis = current_yaxis, name = "MFI (Volume RSI)", color = "#16a085", type = "line", lineWidth = 2) %>%
+            hc_add_series(MFI.BuyLevel, yAxis = current_yaxis, name = "MFI Oversold (20)", color = hex_to_rgba("green", 0.3), dashStyle = "Dash") %>%
+            hc_add_series(MFI.SellLevel, yAxis = current_yaxis, name = "MFI Overbought (80)", color = hex_to_rgba("red", 0.3), dashStyle = "Dash")
+        }
+        current_yaxis <- current_yaxis + 1
+      }
+      
+      if (!is.null(adx)) {
+        ADX.TrendLevel <- xts(rep(25, NROW(this_stock_clean)), index(this_stock_clean))
+        chart <- chart %>%
+          hc_add_series(adx$ADX, yAxis = current_yaxis, name = "ADX (Trend Strength)", color = "#9b59b6", type = "line", lineWidth = 2) %>%
+          hc_add_series(adx$DIp, yAxis = current_yaxis, name = "+DI", color = "#2ecc71", type = "line", lineWidth = 1.5) %>%
+          hc_add_series(adx$DIn, yAxis = current_yaxis, name = "-DI", color = "#e74c3c", type = "line", lineWidth = 1.5) %>%
+          hc_add_series(ADX.TrendLevel, yAxis = current_yaxis, name = "Trend Threshold (25)", color = hex_to_rgba("white", 0.5), dashStyle = "Dash")
+      }
+      
+      chart %>%
         hc_add_theme(
           hc_theme(
-            chart = list(
-              backgroundColor = "#151b3d",
-              plotBackgroundColor = "#0a0e27"
-            ),
+            chart = list(backgroundColor = "#151b3d", plotBackgroundColor = "#0a0e27"),
             title = list(style = list(color = "#e8eaed", fontWeight = "600")),
             subtitle = list(style = list(color = "#b0b3b8")),
-            yAxis = list(
-              gridLineColor = "#2a3150",
-              labels = list(style = list(color = "#e8eaed")),
-              title = list(style = list(color = "#e8eaed"))
-            ),
-            xAxis = list(
-              gridLineColor = "#2a3150",
-              labels = list(style = list(color = "#e8eaed")),
-              lineColor = "#2a3150"
-            ),
-            tooltip = list(
-              backgroundColor = "#1a2142",
-              style = list(color = "#e8eaed")
-            ),
-            legend = list(
-              itemStyle = list(color = "#e8eaed"),
-              itemHoverStyle = list(color = "#00d4ff")
-            ),
-            navigator = list(
-              maskFill = "rgba(0, 212, 255, 0.1)",
-              outlineColor = "#2a3150",
-              series = list(
-                color = "#00d4ff",
-                lineColor = "#00d4ff"
-              )
-            ),
-            scrollbar = list(
-              barBackgroundColor = "#2a3150",
-              barBorderColor = "#2a3150",
-              buttonBackgroundColor = "#2a3150",
-              buttonBorderColor = "#2a3150",
-              rifleColor = "#e8eaed",
-              trackBackgroundColor = "#151b3d",
-              trackBorderColor = "#2a3150"
-            )
+            yAxis = list(gridLineColor = "#2a3150", labels = list(style = list(color = "#e8eaed")), title = list(style = list(color = "#e8eaed"))),
+            xAxis = list(gridLineColor = "#2a3150", labels = list(style = list(color = "#e8eaed")), lineColor = "#2a3150"),
+            tooltip = list(backgroundColor = "#1a2142", style = list(color = "#e8eaed")),
+            legend = list(itemStyle = list(color = "#e8eaed"), itemHoverStyle = list(color = "#00d4ff")),
+            navigator = list(maskFill = "rgba(0, 212, 255, 0.1)", outlineColor = "#2a3150", series = list(color = "#00d4ff", lineColor = "#00d4ff")),
+            scrollbar = list(barBackgroundColor = "#2a3150", barBorderColor = "#2a3150", buttonBackgroundColor = "#2a3150", buttonBorderColor = "#2a3150", rifleColor = "#e8eaed", trackBackgroundColor = "#151b3d", trackBorderColor = "#2a3150")
           )
         ) %>%
-        
-        hc_title(
-          text = paste("Technical Analysis:", input$stock),
-          style = list(fontSize = "18px", fontWeight = "600")
-        ) %>%
-        hc_subtitle(
-          text = "Buy Signal: RSI < 30 + BB Lower Touch | Sell Signal: RSI > 70 + MACD Bearish Cross"
-        ) %>%
-        hc_tooltip(
-          valueDecimals = 2,
-          shared = FALSE,
-          split = FALSE
-        ) %>%
+        hc_title(text = paste("Technical Analysis:", input$stock), style = list(fontSize = "18px", fontWeight = "600")) %>%
+        hc_subtitle(text = "Strong Buy: RSI<30 + Stoch<20 + MFI<20 + OBV Rising + ADX<25 | Sell: RSI>70 + MACD Cross") %>%
+        hc_tooltip(valueDecimals = 2, shared = FALSE, split = FALSE) %>%
         hc_rangeSelector(
           buttons = list(
             list(type = "month", count = 1, text = "1m"),
@@ -225,6 +545,100 @@ mod_stock_analysis_Server <- function(id) {
           selected = 4
         )
     })
+    
+    # Render indicator guide panel
+    # Render indicator guide panel (FIXED)
+    # Render indicator guide panel (CORRECTED)
+    output$guide_panel <- renderUI({
+      if (!guide_visible()) return(NULL)
+      
+      div(
+        style = "margin-top: 20px;",
+        accordion(
+          id = ns("guide_accordion"),
+          accordion_panel(
+            title = "RSI & Stochastic",
+            value = "rsi_stoch",
+            HTML("
+          <p><strong>RSI (Relative Strength Index):</strong> &lt; 30 = Oversold (buy), &gt; 70 = Overbought (sell)</p>
+          <p><strong>Stochastic:</strong> More sensitive than RSI. &lt; 20 = Oversold, &gt; 80 = Overbought</p>
+          <p style='color: #00ff88;'><strong>Buy Signal:</strong> RSI &lt; 30 AND Stochastic &lt; 20 with both rising</p>
+        ")
+          ),
+        accordion_panel(
+          title = "Bollinger Bands & EMAs",
+          value = "bb_ema",
+          HTML("
+          <p><strong>Bollinger Bands:</strong> Price at lower band = oversold, upper band = overbought</p>
+          <p><strong>EMA 50:</strong> Short-term trend. Buy dips when price &gt; EMA 50</p>
+          <p><strong>EMA 200:</strong> Long-term trend. Only buy aggressive dips if price &gt; EMA 200</p>
+          <p style='color: #00ff88;'><strong>Buy Signal:</strong> Price touches BB lower + above EMA 200</p>
+        ")
+        ),
+        accordion_panel(
+          title = "MACD",
+          value = "macd",
+          HTML("
+          <p><strong>MACD Line &gt; Signal Line:</strong> Bullish momentum</p>
+          <p><strong>Histogram bars growing:</strong> Strengthening momentum</p>
+          <p style='color: #00ff88;'><strong>Buy Signal:</strong> MACD crosses above Signal after dip</p>
+          <p style='color: #ff4757;'><strong>Sell Signal:</strong> MACD crosses below Signal with RSI &gt; 70</p>
+        ")
+        ),
+        accordion_panel(
+          title = "OBV & MFI (Volume)",
+          value = "volume",
+          HTML("
+          <p><strong>OBV Rising + Price Falling:</strong> Institutions accumulating (STRONG BUY)</p>
+          <p><strong>MFI &lt; 20:</strong> Oversold with volume confirmation</p>
+          <p style='color: #00ff88;'><strong>Buy Signal:</strong> MFI &lt; 20 with high volume + rising OBV</p>
+          <p style='color: #ffa502;'><strong>Avoid:</strong> Falling OBV during dips = distribution</p>
+        ")
+        ),
+        accordion_panel(
+          title = "ADX (Trend Strength)",
+          value = "adx",
+          HTML("
+          <p><strong>ADX &lt; 25:</strong> Weak trend - ideal for dip buying (mean reversion)</p>
+          <p><strong>ADX &gt; 25:</strong> Strong trend - dips may continue, avoid catching falling knife</p>
+          <p><strong>+DI &gt; -DI:</strong> Bullish direction</p>
+          <p style='color: #00ff88;'><strong>Buy Signal:</strong> ADX &lt; 25 with +DI crossing above -DI</p>
+        ")
+        ),
+        accordion_panel(
+          title = "Decision Framework",
+          value = "framework",
+          HTML("
+          <h5 style='color: #00ff88;'>Conservative Buy:</h5>
+          <ul>
+            <li>Z-score &lt; -2</li>
+            <li>RSI &lt; 30</li>
+            <li>Price at BB Lower</li>
+            <li>OBV rising</li>
+            <li>ADX &lt; 25</li>
+            <li>Price &gt; EMA 200</li>
+          </ul>
+          <h5 style='color: #ffa502;'>Aggressive Buy:</h5>
+          <ul>
+            <li>Z-score &lt; -2.5</li>
+            <li>RSI &lt; 25 + Stoch &lt; 20</li>
+            <li>MFI &lt; 20</li>
+            <li>MACD turning positive</li>
+          </ul>
+          <h5 style='color: #ff4757;'>Sell Signal:</h5>
+          <ul>
+            <li>RSI &gt; 70</li>
+            <li>MACD bearish cross</li>
+            <li>OBV divergence</li>
+            <li>MFI &gt; 80</li>
+          </ul>
+        ")
+        )
+        )
+      )
+    })
+    
+    
     
   })
 }
