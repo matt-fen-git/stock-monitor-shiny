@@ -4,9 +4,13 @@ get_dips <- function(symbol_name) {
   require(tidyverse)
   require(TTR)
   require(quantmod)
+  require(future)
+  require(furrr)
   tryCatch({
     
     data <- stock_data_list[[symbol_name]]
+    
+    if (is.null(data)) return(NULL)
     
     # Calculate ROC with a period of 30 days
     roc_data <- ROC(Cl(data %>% 
@@ -22,8 +26,13 @@ get_dips <- function(symbol_name) {
     # Rename the joined column
     colnames(this_data)[ncol(this_data)] <- "roc_z"
     
+    
+    
+    z_threshold <- quantile(this_data$roc_z, 0.05, na.rm = TRUE)
+    
     # Flag Outlier
     this_data$outlier <- ifelse(this_data$roc_z <= -2, 1, 0) # This needs to be investigated better...
+    this_data$outlier <- ifelse(this_data$roc_z <= z_threshold, 1, 0)
     
     # Convert to a data frame and filter for outliers
     this_data_df <- 
@@ -57,5 +66,14 @@ tick_names <- names(stock_data_list)
 
 
 all_dips_data <- do.call(rbind,purrr::map(tick_names,get_dips,.progress = TRUE))
+
+# Set up parallel processing (adjust workers as needed; leave one core free)
+plan(multisession, workers = availableCores() - 1)
+
+# Parallel map with progress (replaces purrr::map for speed)
+all_dips_list <- future_map(tick_names, get_dips, .progress = TRUE)
+
+# Efficiently bind results, removing NULLs and adding idcol
+all_dips_data <- data.table::rbindlist(compact(all_dips_list), fill = TRUE, idcol = "Stock")
 
 data.table::fwrite(all_dips_data,"~/Kaggle Projects/shiny-stock-monitor/app-files/data/all_dips_data.csv")

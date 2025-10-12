@@ -32,6 +32,7 @@ tickers <- sp500_table$Symbol
 # This is where I'll store the data
 stock_data_list <- list()
 
+
 # Looping through & getting all the data.. 
 
 # Function to download stock data
