@@ -1,4 +1,3 @@
-# UI Module with Signal Gauges
 mod_stock_analysis_UI <- function(id) {
   ns <- NS(id)
   fluidPage(
@@ -6,38 +5,37 @@ mod_stock_analysis_UI <- function(id) {
       column(
         2,
         wellPanel(
-          style = "background: #151b3d; border: 1px solid #2a3150;",
-          selectInput(ns("stock"), "Select Stock:", choices = names(stock_data_list)),
+          style = "background: #151b3d; border: 1px solid #2a3150; height: 100vh; overflow-y: auto;",
+          h4("Controls", style = "color: #00d4ff;"),
+          selectizeInput(
+            ns("stock"),
+            "Select or Enter Stock Symbol:",
+            choices = names(stock_data_list),
+            options = list(
+              create = TRUE,
+              placeholder = "e.g., AAPL, MSFT, BTC-USD"
+            )
+          ),
           dateRangeInput(ns("dateRange"), "Select Date Range:",
                          start = Sys.Date() - 365,
-                         end = Sys.Date()
-          ),
-          checkboxGroupInput(
-            ns("indicators"),
-            "Additional Indicators:",
-            choices = c(
-              "Stochastic Oscillator" = "stoch",
-              "MFI (Volume RSI)" = "mfi",
-              "OBV (Volume Trend)" = "obv",
-              "ADX (Trend Strength)" = "adx",
-              "EMAs (50 & 200)" = "ema"
-            ),
-            selected = c("stoch", "obv", "adx")
-          ),
+                         end = Sys.Date()),
+          checkboxGroupInput(ns("indicators"), "Additional Indicators:",
+                             choices = c("Stochastic Oscillator" = "stoch", "MFI (Volume RSI)" = "mfi",
+                                         "OBV (Volume Trend)" = "obv", "ADX (Trend Strength)" = "adx",
+                                         "EMAs (50 & 200)" = "ema"),
+                             selected = c("stoch", "obv", "adx")),
           actionButton(ns("update"), "Update Chart", class = "btn-primary", style = "width: 100%;"),
           hr(),
-          actionButton(ns("toggle_guide"), "Show/Hide Indicator Guide", 
+          actionButton(ns("toggle_guide"), "Show/Hide Indicator Guide",
                        class = "btn-info", style = "width: 100%;")
         )
       ),
       column(
         10,
-        # Signal Gauges Panel
         div(
           style = "background: linear-gradient(135deg, #1a2142 0%, #151b3d 100%); 
                    border: 1px solid #2a3150; border-radius: 8px; padding: 15px; margin-bottom: 20px;",
-          h4("Buy/Sell Signal Dashboard", 
-             style = "color: #00d4ff; text-align: center; margin-bottom: 15px;"),
+          h4("Buy/Sell Signal Dashboard", style = "color: #00d4ff; text-align: center; margin-bottom: 15px;"),
           uiOutput(ns("signal_gauges"))
         ),
         highchartOutput(ns("stockChart"), height = "800px"),
@@ -47,6 +45,7 @@ mod_stock_analysis_UI <- function(id) {
     )
   )
 }
+
 
 # Server Module
 mod_stock_analysis_Server <- function(id) {
@@ -59,17 +58,31 @@ mod_stock_analysis_Server <- function(id) {
       guide_visible(!guide_visible())
     })
     
+    # --- THIS IS THE CORRECTED BLOCK ---
     filtered_data <- eventReactive(input$update, {
-      this_stock <- stock_data_list[[input$stock]]
-      this_stock <- this_stock[paste(input$dateRange[1], input$dateRange[2], sep = "/")]
+      # 1. Select the correct tibble from the list
+      this_stock_tibble <- stock_data_list[[input$stock]]
       
-      if (nrow(this_stock) < 30) {
-        showNotification("Insufficient data for indicators. Try a wider date range.", type = "warning")
+      # 2. Filter the tibble using dplyr::filter on the 'Date' column
+      filtered_tibble <- this_stock_tibble %>%
+        filter(Date >= input$dateRange[1] & Date <= input$dateRange[2])
+      
+      # 3. Check for sufficient data after filtering
+      if (nrow(filtered_tibble) < 30) {
+        showNotification("Insufficient data for indicators. Please try a wider date range.", type = "warning")
         return(NULL)
       }
       
-      this_stock
-    })
+      # 4. Convert the filtered tibble back to an xts object for TTR functions
+      # The TTR functions (RSI, MACD, etc.) expect xts objects.
+      this_stock_xts <- xts(
+        x = filtered_tibble[, -(1:3)], # Select only numeric OHLCV columns
+        order.by = filtered_tibble$Date
+      )
+      
+      return(this_stock_xts)
+      
+    }, ignoreNULL = FALSE) # i
     
     # Calculate signal scores
     # Calculate signal scores (FULLY FIXED)
@@ -122,14 +135,25 @@ mod_stock_analysis_Server <- function(id) {
       )
       
       # Stochastic
+      # Stochastic (FIXED - proper scaling 0-100)
       if ("stoch" %in% input$indicators) {
         stoch_vals <- stoch(HLC(this_stock_clean), nFastK = 14, nSlowK = 3, nSlowD = 3)
-        stoch_k <- as.numeric(tail(stoch_vals[, "fastK"], 1))
-        if (is.na(stoch_k)) stoch_k <- 50
+        
+        # Check if values are 0-1 range and scale to 0-100
+        stoch_k_raw <- as.numeric(tail(stoch_vals[, "fastK"], 1))
+        
+        # TTR::stoch returns 0-1 range, multiply by 100
+        stoch_k <- if (!is.na(stoch_k_raw) && stoch_k_raw <= 1) stoch_k_raw * 100 else if (!is.na(stoch_k_raw)) stoch_k_raw else 50
+        
+        # Signal interpretation
         stoch_signal <- if (stoch_k < 20) "Strong Buy" else if (stoch_k < 40) "Buy" else if (stoch_k < 60) "Neutral" else if (stoch_k < 80) "Sell" else "Strong Sell"
-        stoch_score <- 100 - stoch_k
+        
+        # Score calculation
+        stoch_score <- if (stoch_k < 20) 100 else if (stoch_k < 40) 75 else if (stoch_k < 60) 50 else if (stoch_k < 80) 25 else 0
+        
         signals$stoch <- list(signal = stoch_signal, score = stoch_score, value = round(stoch_k, 1))
       }
+      
       
       # MFI
       if ("mfi" %in% input$indicators) {
@@ -447,7 +471,7 @@ mod_stock_analysis_Server <- function(id) {
       
       # Build chart
       chart <- highchart(type = "stock") %>%
-        hc_yAxis_multiples(create_yaxis(num_panels, height = panel_heights, turnopposite = TRUE)) %>%
+        hc_yAxis_multiples(create_axis(num_panels, height = panel_heights, turnopposite = TRUE)) %>%
         hc_add_series(
           this_stock_clean,
           type = "candlestick",

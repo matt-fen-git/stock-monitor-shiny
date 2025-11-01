@@ -3,7 +3,7 @@ library(bslib)
 library(gridlayout)
 
 # Source global & module files
-source("global.R")
+source(here::here("app-files", "global.R"), chdir = TRUE)
 invisible(purrr::map(dir("modules/", full.names = TRUE, recursive = TRUE), source))
 
 # Dark theme configuration
@@ -369,7 +369,10 @@ ui <- navbarPage(
 # Server
 server <- function(input, output, session) {
   mod_stock_analysis_Server("stockAnalysis")
-  mod_risers_fallers_Server("risersFallers")
-}
+  mod_risers_fallers_Server(
+    id = "risersFallers",
+    all_dips_data = all_dips_data,      # Pass the global object here
+    stock_data_list = stock_data_list   # Pass the global object here
+  )}
 
 shinyApp(ui, server)

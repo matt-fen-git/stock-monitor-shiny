@@ -1,7 +1,19 @@
-# UI Module
+# --- UI Module (Unchanged) ---
 mod_risers_fallers_UI <- function(id) {
   ns <- NS(id)
   tagList(
+    # Add custom styling for value boxes to ensure text is visible on dark themes
+    tags$head(
+      tags$style(HTML("
+        .bslib-value-box .value-box-title,
+        .bslib-value-box .value-box-value {
+          color: #ffffff !important;
+        }
+        .bslib-value-box .value-box-showcase {
+          color: #ffffff !important;
+        }
+      "))
+    ),
     useShinyalert(force = TRUE),
     sidebarLayout(
       sidebarPanel(
@@ -18,7 +30,7 @@ mod_risers_fallers_UI <- function(id) {
         sliderInput(ns("z_threshold"), 
                     "Z-Score Threshold (Buy Signal):",
                     min = -4, max = 0, value = -2, step = 0.1),
-        actionButton(ns("update"), "Update Table", class = "btn-primary")
+        actionButton(ns("update"), "Update Table", class = "btn-primary", style = "width: 100%;")
       ),
       mainPanel(
         width = 10,
@@ -44,17 +56,20 @@ mod_risers_fallers_UI <- function(id) {
           )
         ),
         br(),
-        withSpinner(gt_output(ns("faller_table")))
+        # Use a spinner for better user experience during calculation
+        shinycssloaders::withSpinner(gt_output(ns("faller_table")))
       )
     )
   )
 }
 
-# Server Module
-mod_risers_fallers_Server <- function(id) {
+
+# --- Server Module (Corrected) ---
+mod_risers_fallers_Server <- function(id, all_dips_data, stock_data_list) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     
+    # Initial popup to guide the user
     shinyalert(
       title = "Dip Scanner Ready",
       text = "Click 'Update Table' to scan for buy opportunities based on ROC z-scores.",
@@ -62,21 +77,22 @@ mod_risers_fallers_Server <- function(id) {
       closeOnClickOutside = TRUE
     )
     
+    # Reactive expression to filter the main data based on UI inputs
     table_data <- eventReactive(input$update, {
+      req(all_dips_data) # Ensure the base data is loaded
+      
+      # Date filtering logic
       if (input$range == 9999) {
         faller_data <- all_dips_data %>% 
           filter(between(date, as.Date(input$dateRange[1]), as.Date(input$dateRange[2])))
-      } else if (input$range == 7) {
+      } else {
+        # Handles 7, 31, 90 day ranges relative to the latest date in the dataset
+        latest_date <- max(all_dips_data$date)
         faller_data <- all_dips_data %>% 
-          filter(date >= max(date) - 7 & date <= max(date))
-      } else if (input$range == 31) {
-        faller_data <- all_dips_data %>% 
-          filter(date >= max(date) - 31 & date <= max(date))
-      } else if (input$range == 90) {
-        faller_data <- all_dips_data %>% 
-          filter(date >= max(date) - 90 & date <= max(date))
+          filter(date >= (latest_date - as.numeric(input$range)))
       }
       
+      # Mutate data to add calculated columns for the table
       faller_data <- faller_data %>%
         mutate(
           price_change_pct = ((adjusted - open) / open) * 100,
@@ -98,96 +114,84 @@ mod_risers_fallers_Server <- function(id) {
         ) %>%
         arrange(desc(date), roc_z)
       
+      # Final filtering based on the z-score threshold slider
       faller_data %>% filter(roc_z <= input$z_threshold)
     })
     
-    output$total_dips <- renderText({
-      nrow(table_data())
-    })
+    # Render value box outputs
+    output$total_dips <- renderText({ nrow(table_data()) })
+    output$strong_buys <- renderText({ sum(table_data()$roc_z <= -2.5, na.rm = TRUE) })
+    output$avg_dip <- renderText({ round(mean(table_data()$roc_z, na.rm = TRUE), 2) })
     
-    output$strong_buys <- renderText({
-      sum(table_data()$roc_z <= -2, na.rm = TRUE)
-    })
-    
-    output$avg_dip <- renderText({
-      round(mean(table_data()$roc_z, na.rm = TRUE), 2)
-    })
-    
-    # Enhanced GT table with corrected sparkline
-    # Enhanced GT table with WORKING sparkline (fixed list-column preservation)
+    # --- CORRECTED GT Table Rendering ---
     output$faller_table <- render_gt({
       faller_data <- table_data()
       
-      if (nrow(faller_data) == 0) {
-        return(gt(data.frame(Message = "No dips found matching criteria")) %>%
-                 tab_style(style = cell_text(color = "red", weight = "bold"),
-                           locations = cells_body()))
+      if (is.null(faller_data) || nrow(faller_data) == 0) {
+        return(gt(data.frame(Message = "No dips found matching your criteria.")) %>%
+                 tab_header(title = "No Data Available"))
       }
       
+      # --- FIX STARTS HERE ---
+      
+      # 1. Get the unique stock names (Security names) from the filtered data
       unique_stocks <- unique(faller_data$stock)
       
-      # FIXED: Build sparkline data using tibble instead of data.frame to preserve list-column
-      sparkline_list <- lapply(unique_stocks, function(stock_name) {
-        stock_full <- stock_data_list[[stock_name]]
+      # 2. Prepare the sparkline data correctly
+      sparkline_data <- purrr::map_df(unique_stocks, function(stock_name) {
+        stock_full_data <- stock_data_list[[stock_name]]
         
-        if (is.null(stock_full)) {
-          prices <- rep(NA_real_, 30)
+        prices <- if (!is.null(stock_full_data)) {
+          # Dynamically find the close column (e.g., 'MMM.Close') and get the last 30 values
+          close_col_name <- names(stock_full_data)[grepl("\\.Close$", names(stock_full_data))]
+          tail(stock_full_data[[close_col_name]], 30)
         } else {
-          stock_recent <- tail(stock_full, 30)
-          prices <- as.numeric(Cl(stock_recent))
-          
-          if (length(prices) < 30) {
-            prices <- c(rep(NA_real_, 30 - length(prices)), prices)
-          }
+          # If data is missing for some reason, create a vector of NAs
+          NA_real_
         }
         
-        list(stock = stock_name, price_trend = list(prices))  # Return as named list
+        # Ensure the vector has exactly 30 values, padding with NAs if necessary
+        if (length(prices) < 30) {
+          prices <- c(rep(NA_real_, 30 - length(prices)), prices)
+        }
+        
+        # Return a tibble with the stock name and a list-column containing the prices vector
+        tibble(stock = stock_name, price_trend = list(prices))
       })
       
-      # Convert to tibble to preserve list-column structure
-      sparkline_data <- tibble(
-        stock = sapply(sparkline_list, function(x) x$stock),
-        price_trend = lapply(sparkline_list, function(x) x$price_trend[[1]])
-      )
-      
-      # Join with faller data
+      # 3. Join the sparkline data back to the main data
       faller_with_sparklines <- left_join(faller_data, sparkline_data, by = "stock")
       
-      # Verify list-column exists (debug - remove after testing)
-      print(paste("Price trend class:", class(faller_with_sparklines$price_trend)))
-      print(paste("First element:", length(faller_with_sparklines$price_trend[[1]])))
+      # --- FIX ENDS HERE ---
       
-      # Build gt table
-      faller_with_sparklines %>% select(-price_trend)%>%
+      # Build the final gt table
+      faller_with_sparklines %>%
         gt() %>%
+        # The sparkline function will now work correctly
+        gt_plt_sparkline(
+          column = price_trend,
+          type = "default",
+          fig_dim = c(15, 45),
+          palette = c("#00d4ff", "#00d4ff", "#ff4757", "#00ff88", "#b0b3b8")
+        ) %>%
         cols_label(
           date = "Dip Date",
-          stock = "Ticker",
+          stock = "Company",
           buy_signal = "Signal",
           dip_severity = "Severity",
           roc_z = "Z-Score",
-          close = "Close",
           adjusted = "Adj Close",
           price_change_pct = "% Change",
           volume = "Volume",
-          vol_relative = "Vol Type",
-          days_since = "Days Ago"#,
-#          price_trend = "30-Day Trend"
+          days_since = "Days Ago",
+          price_trend = "30-Day Trend"
         ) %>%
-        # gt_plt_sparkline(
-        #   column = price_trend,
-        #   type = "default",
-        #   fig_dim = c(15, 30),
-        #   same_limit = FALSE,
-        #   label = TRUE
-        # ) %>%
-        cols_hide(columns = c(outlier)) %>%
+        cols_hide(columns = c(open, high, low, close, outlier, vol_relative)) %>%
         fmt_date(date, date_style = "yMd") %>%
         fmt_number(roc_z, decimals = 2) %>%
-        fmt_number(price_change_pct, decimals = 1, pattern = "{x}%") %>%
-        fmt_currency(columns = c(open,high,low,close, adjusted), currency = "USD", decimals = 2) %>%
+        fmt_currency(columns = c(adjusted), currency = "USD") %>%
         fmt_number(volume, decimals = 0, scale_by = 1e-6, pattern = "{x}M") %>%
-        cols_move_to_start(columns = c(date, stock, buy_signal, dip_severity, roc_z)) %>%
+        cols_move_to_start(columns = c(date, stock, price_trend, buy_signal, dip_severity, roc_z)) %>%
         data_color(
           columns = roc_z,
           method = "numeric",
@@ -195,38 +199,25 @@ mod_risers_fallers_Server <- function(id) {
           domain = c(-4, 0),
           reverse = TRUE
         ) %>%
-        data_color(
-          columns = dip_severity,
-          method = "factor",
-          palette = c("Extreme" = "#8B0000", "Severe" = "#FF4500", 
-                      "Strong" = "#FFA500", "Moderate" = "#FFD700")
-        ) %>%
         tab_style(
-          style = cell_fill(color = "#E8F5E9"),
+          style = cell_fill(color = "#2a3150"),
           locations = cells_body(rows = roc_z <= -2.5)
         ) %>%
         tab_header(
-          title = md("**S&P 500 Dip Opportunities**"),
-          subtitle = md("*Ranked by recent dips with strongest buy signals*")
+          title = md("**Stock Dip Opportunities**"),
+          subtitle = md("*Scanning for z-score based mean-reversion signals.*")
         ) %>%
+        opt_interactive(use_filters = TRUE, use_search = TRUE) %>%
         tab_options(
-          table.font.size = px(12),
-          heading.title.font.size = px(16),
-          heading.subtitle.font.size = px(12)
-        ) %>%
-        opt_interactive(
-          use_filters = TRUE,
-          use_search = TRUE,
-          use_sorting = TRUE,
-          use_page_size_select = TRUE,
-          page_size_default = 25
+          table.background.color = "#151b3d",
+          table.font.color = "#e8eaed",
+          column_labels.background.color = "#1a2142",
+          heading.background.color = "#1a2142"
         ) %>%
         tab_footnote(
-          footnote = "Z-Score < -2 indicates oversold condition (strong buy signal)",
+          footnote = "Z-Score < -2 indicates a statistically significant dip.",
           locations = cells_column_labels(columns = roc_z)
         )
     })
-    
-    
-  })  # Close moduleServer
-}  # Close mod_risers_fallers_Server
+  })
+}

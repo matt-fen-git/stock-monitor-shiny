@@ -13,6 +13,7 @@ library(tidyr)
 library(dplyr)
 library(highcharter)
 library(lubridate)
+library(purrr)
 
 # Read the content of the text file and convert it to Markdown
 # rsi_content <- suppressWarnings(readLines("~/Kaggle Projects/shiny-stock-monitor/app-files/Descriptions/rsi_info.txt"))
